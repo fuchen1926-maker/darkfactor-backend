@@ -90,7 +90,7 @@ let client = null;
 // === 中间件 ===
 app.use(cors({
     origin: [
-        'https://zippy-chebakia-98bca0.netlify.app',
+        'https://snazzy-hotteok-562635.netlify.app',
         'http://localhost:3000',
         'http://127.0.0.1:3000'
     ],
