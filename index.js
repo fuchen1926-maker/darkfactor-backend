@@ -1,4 +1,4 @@
-// index.js - 安全增强版本
+// index.js - 安全增强版本（修复路由问题）
 
 const express = require('express');
 require('dotenv').config();
@@ -180,15 +180,16 @@ initializeAccessCodes();
 cleanupSecurityRecords();
 checkForAttacks();
 
-// === 安全中间件 ===
+// === 修复的 CORS 中间件 ===
 app.use((req, res, next) => {
     // CORS配置
     res.header('Access-Control-Allow-Origin', '*');
     res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-    res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
+    res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With, Access-Code');
     
+    // 处理预检请求
     if (req.method === 'OPTIONS') {
-        return res.status(200).send();
+        return res.status(200).end();
     }
     
     next();
@@ -285,14 +286,14 @@ app.post('/api/check-access-code', (req, res) => {
     try {
         const { accessCode } = req.body;
         const securityRecord = req.securityRecord;
-        const clientIP = securityRecord.ip;
+        const clientIP = securityRecord ? securityRecord.ip : getClientIP(req);
 
         // 全局统计
         ATTACK_DETECTION.totalAttempts++;
 
         // 验证输入存在性和类型
         if (!accessCode || typeof accessCode !== 'string') {
-            securityRecord.addAttempt(false);
+            if (securityRecord) securityRecord.addAttempt(false);
             ATTACK_DETECTION.failedAttempts++;
             return res.status(400).json({ 
                 valid: false, 
@@ -304,7 +305,7 @@ app.post('/api/check-access-code', (req, res) => {
         const cleanedAccessCode = accessCode.trim().toUpperCase();
         
         if (cleanedAccessCode.length === 0) {
-            securityRecord.addAttempt(false);
+            if (securityRecord) securityRecord.addAttempt(false);
             ATTACK_DETECTION.failedAttempts++;
             return res.status(400).json({ 
                 valid: false, 
@@ -314,7 +315,7 @@ app.post('/api/check-access-code', (req, res) => {
 
         // 格式验证
         if (!isValidAccessCodeFormat(cleanedAccessCode)) {
-            securityRecord.addAttempt(false);
+            if (securityRecord) securityRecord.addAttempt(false);
             ATTACK_DETECTION.failedAttempts++;
             console.log(`⚠️ IP ${clientIP} 尝试使用无效格式的访问码: ${cleanedAccessCode}`);
             return res.status(400).json({
@@ -336,7 +337,7 @@ app.post('/api/check-access-code', (req, res) => {
             validCode.lastUsed = new Date();
             
             // 记录成功尝试
-            securityRecord.addAttempt(true);
+            if (securityRecord) securityRecord.addAttempt(true);
             
             console.log(`✅ 访问码验证成功: ${cleanedAccessCode} (IP: ${clientIP})`);
             
@@ -349,7 +350,7 @@ app.post('/api/check-access-code', (req, res) => {
             });
         } else {
             // 记录失败尝试
-            securityRecord.addAttempt(false);
+            if (securityRecord) securityRecord.addAttempt(false);
             ATTACK_DETECTION.failedAttempts++;
             
             // 检查访问码状态
@@ -540,10 +541,22 @@ app.post('/api/rankings', (req, res) => {
     }
 });
 
+// 启动服务器
 app.listen(PORT, HOST, () => {
     console.log(`🚀 服务器正在 ${HOST}:${PORT} 上运行`);
     console.log(`🔒 安全防护: 已启用IP监控、频率限制和攻击检测`);
     console.log(`📍 健康检查: http://${HOST}:${PORT}/api/health`);
     console.log(`🔐 访问码验证接口: POST http://${HOST}:${PORT}/api/check-access-code`);
     console.log(`👨‍💼 安全管理: GET http://${HOST}:${PORT}/api/admin/security-status?adminKey=YOUR_KEY`);
+});
+
+// 优雅关闭处理
+process.on('SIGTERM', () => {
+    console.log('收到 SIGTERM 信号，开始优雅关闭...');
+    process.exit(0);
+});
+
+process.on('SIGINT', () => {
+    console.log('收到 SIGINT 信号，开始优雅关闭...');
+    process.exit(0);
 });
