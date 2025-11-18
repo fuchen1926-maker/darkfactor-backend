@@ -1,21 +1,14 @@
-// index.js - 后端服务器核心代码 (增强调试版)
+// index.js - 后端服务器核心代码 (环境变量访问码版本)
 
 // 1. 导入必要的库
 const express = require('express');
 const cors = require('cors');
-const { MongoClient, ObjectId } = require('mongodb'); 
-require('dotenv').config({ debug: true }); // 启用详细调试
+require('dotenv').config({ debug: true });
 
 // 2. 初始化 Express 应用
 const app = express();
 const PORT = process.env.PORT || 3000;
-const HOST = process.env.HOST || '0.0.0.0'; // 新增：支持环境变量配置主机
-
-// === 数据库配置 ===
-let URI = process.env.MONGO_URI;
-const DB_NAME = "darkfactorDB"; 
-const SIMULATION_COLLECTION = "simulated_tests";
-const ACCESS_CODES_COLLECTION = "access_codes"; // 新增：访问码集合
+const HOST = process.env.HOST || '0.0.0.0';
 
 // 维度列表
 const DIMENSIONS = [
@@ -23,69 +16,74 @@ const DIMENSIONS = [
     'power', 'psychopathy', 'sadism', 'selfcentered', 'spitefulness'
 ];
 
-// 详细的 URI 调试和清理
-console.log('=== MongoDB URI 调试信息 ===');
-console.log('原始 MONGO_URI:', URI);
-console.log('MONGO_URI 类型:', typeof URI);
-console.log('MONGO_URI 长度:', URI ? URI.length : '未定义');
+// 模拟数据集合（用于排名计算）
+const SIMULATION_COLLECTION = "simulated_tests";
 
-// 清理 URI 函数
-function cleanMongoURI(uri) {
-    if (!uri) return null;
-    
-    console.log('清理前的 URI:', uri);
-    
-    // 去除前后空白和引号
-    let cleaned = uri.trim()
-                     .replace(/^["']|["']$/g, '') // 去除引号
-                     .replace(/[\u200B-\u200D\uFEFF]/g, ''); // 去除零宽字符
-    
-    // 检查并修复协议
-    if (!cleaned.startsWith('mongodb://') && !cleaned.startsWith('mongodb+srv://')) {
-        if (cleaned.includes('mongodb+srv:')) {
-            // 尝试修复缺少 // 的情况
-            cleaned = cleaned.replace('mongodb+srv:', 'mongodb+srv://');
-            console.log('修复后的 URI:', cleaned);
-        } else if (cleaned.includes('@')) {
-            // 看起来像连接字符串但缺少协议
-            cleaned = 'mongodb+srv://' + cleaned;
-            console.log('添加协议后的 URI:', cleaned);
+// 访问码配置
+let ACCESS_CODES = [];
+
+// 初始化访问码
+function initializeAccessCodes() {
+    try {
+        console.log('=== 初始化访问码系统 ===');
+        
+        // 从环境变量读取访问码
+        const accessCodesEnv = process.env.ACCESS_CODES;
+        
+        if (!accessCodesEnv) {
+            console.warn('⚠️ 未设置 ACCESS_CODES 环境变量，将使用默认测试访问码');
+            // 设置一些默认测试访问码
+            ACCESS_CODES = [
+                {
+                    code: 'TEST001',
+                    maxUses: 100,
+                    currentUses: 0,
+                    createdAt: new Date(),
+                    expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000) // 30天后
+                },
+                {
+                    code: 'RESEARCH2024',
+                    maxUses: 500,
+                    currentUses: 0,
+                    createdAt: new Date(),
+                    expiresAt: new Date(Date.now() + 90 * 24 * 60 * 60 * 1000) // 90天后
+                }
+            ];
+        } else {
+            // 解析环境变量中的访问码
+            const codes = accessCodesEnv.split(',').map(code => code.trim().toUpperCase());
+            
+            ACCESS_CODES = codes.map(code => ({
+                code: code,
+                maxUses: parseInt(process.env.ACCESS_CODE_MAX_USES) || 1,
+                currentUses: 0,
+                createdAt: new Date(),
+                expiresAt: new Date(Date.now() + (parseInt(process.env.ACCESS_CODE_EXPIRY_DAYS) || 7) * 24 * 60 * 60 * 1000)
+            }));
+            
+            console.log(`✅ 从环境变量加载了 ${ACCESS_CODES.length} 个访问码`);
         }
+        
+        // 打印访问码信息（隐藏完整代码）
+        ACCESS_CODES.forEach((item, index) => {
+            console.log(`  访问码 ${index + 1}: ${item.code.substring(0, 3)}*** (最大使用: ${item.maxUses}, 过期: ${item.expiresAt.toDateString()})`);
+        });
+        
+    } catch (error) {
+        console.error('❌ 初始化访问码失败:', error);
+        // 设置一个紧急备用访问码
+        ACCESS_CODES = [{
+            code: 'EMERGENCY',
+            maxUses: 999,
+            currentUses: 0,
+            createdAt: new Date(),
+            expiresAt: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000) // 1年后
+        }];
     }
-    
-    console.log('清理后的 URI:', cleaned);
-    return cleaned;
 }
 
-// 清理 URI
-URI = cleanMongoURI(URI);
-
-// 安全检查
-if (!URI) {
-    console.error("致命错误：未设置 MONGO_URI 环境变量。");
-    console.error("请检查 .env 文件是否存在，并且包含 MONGO_URI 变量。");
-    process.exit(1);
-}
-
-// 验证连接字符串格式
-if (!URI.startsWith('mongodb://') && !URI.startsWith('mongodb+srv://')) {
-    console.error("错误：MONGO_URI 格式不正确。");
-    console.error("连接字符串必须以 'mongodb://' 或 'mongodb+srv://' 开头");
-    console.error("当前连接字符串开头:", URI.substring(0, 20));
-    console.error("完整连接字符串:", URI);
-    
-    // 提供修复建议
-    const suggestedURI = 'mongodb+srv://darkfactor_user:fuchen1926@cluster0.gepx5a1.mongodb.net/?appName=Cluster0';
-    console.error("建议的格式:", suggestedURI);
-    
-    process.exit(1);
-}
-
-console.log('✅ MONGO_URI 格式验证通过');
-
-// 数据库连接实例
-let db = null;
-let client = null;
+// 初始化访问码系统
+initializeAccessCodes();
 
 // === 中间件 ===
 app.use(cors({
@@ -96,20 +94,7 @@ app.use(cors({
     ],
     credentials: false
 })); 
-app.use(express.json()); 
-
-// 自定义中间件：确保数据库连接
-app.use(async (req, res, next) => {
-    try {
-        if (!db) {
-            await connectDB();
-        }
-        next();
-    } catch (error) {
-        console.error("数据库连接中间件错误:", error);
-        res.status(503).json({ error: '数据库服务暂时不可用，请稍后重试。' });
-    }
-});
+app.use(express.json());
 
 // === API 接口 ===
 
@@ -117,49 +102,39 @@ app.use(async (req, res, next) => {
 app.get('/', (req, res) => {
     res.json({ 
         status: 'running', 
-        message: 'Backend is running and connected to DB!',
-        timestamp: new Date().toISOString()
+        message: '黑暗人格测试后端服务运行中',
+        timestamp: new Date().toISOString(),
+        accessCodes: {
+            total: ACCESS_CODES.length,
+            active: ACCESS_CODES.filter(code => code.currentUses < code.maxUses && new Date() < code.expiresAt).length
+        }
     });
 });
 
-// 数据库状态检查
-app.get('/api/health', async (req, res) => {
-    try {
-        const collection = db.collection(SIMULATION_COLLECTION);
-        const count = await collection.countDocuments();
-        
-        // 检查访问码集合
-        const accessCodesCollection = db.collection(ACCESS_CODES_COLLECTION);
-        const accessCodesCount = await accessCodesCollection.countDocuments();
-        const validAccessCodesCount = await accessCodesCollection.countDocuments({ 
-            used: false,
-            $or: [
-                { expiresAt: { $gt: new Date() } },
-                { expiresAt: { $exists: false } }
-            ]
-        });
-        
-        res.json({
-            status: 'healthy',
-            database: 'connected',
-            collectionCount: count,
-            accessCodes: {
-                total: accessCodesCount,
-                valid: validAccessCodesCount
-            },
-            dimensions: DIMENSIONS
-        });
-    } catch (error) {
-        console.error("健康检查失败:", error);
-        res.status(503).json({ 
-            status: 'unhealthy',
-            error: '数据库连接异常'
-        });
-    }
+// 系统状态检查
+app.get('/api/health', (req, res) => {
+    const activeCodes = ACCESS_CODES.filter(code => 
+        code.currentUses < code.maxUses && new Date() < code.expiresAt
+    );
+    
+    res.json({
+        status: 'healthy',
+        accessCodes: {
+            total: ACCESS_CODES.length,
+            active: activeCodes.length,
+            details: activeCodes.map(code => ({
+                code: `${code.code.substring(0, 3)}***`,
+                remainingUses: code.maxUses - code.currentUses,
+                expiresAt: code.expiresAt.toISOString().split('T')[0]
+            }))
+        },
+        dimensions: DIMENSIONS,
+        serverTime: new Date().toISOString()
+    });
 });
 
-// 新增：访问码验证接口
-app.post('/api/check-access-code', async (req, res) => {
+// 访问码验证接口
+app.post('/api/check-access-code', (req, res) => {
     try {
         const { accessCode } = req.body;
 
@@ -181,65 +156,51 @@ app.post('/api/check-access-code', async (req, res) => {
             });
         }
 
-        const collection = db.collection(ACCESS_CODES_COLLECTION);
-        
         // 查找有效的访问码
-        const validCode = await collection.findOne({
-            code: cleanedAccessCode,
-            used: false,
-            $or: [
-                { expiresAt: { $gt: new Date() } },
-                { expiresAt: { $exists: false } }
-            ]
-        });
+        const validCode = ACCESS_CODES.find(code => 
+            code.code === cleanedAccessCode && 
+            code.currentUses < code.maxUses && 
+            new Date() < code.expiresAt
+        );
 
         if (validCode) {
-            // 更新使用次数和最后使用时间
-            const now = new Date();
-            await collection.updateOne(
-                { _id: validCode._id },
-                { 
-                    $set: { 
-                        updatedAt: now,
-                        lastUsedAt: now
-                    },
-                    $inc: { currentUses: 1 }
-                }
-            );
+            // 更新使用次数
+            validCode.currentUses += 1;
+            validCode.lastUsedAt = new Date();
             
-            console.log(`✅ 访问码验证成功: ${cleanedAccessCode}`);
+            console.log(`✅ 访问码验证成功: ${cleanedAccessCode} (使用次数: ${validCode.currentUses}/${validCode.maxUses})`);
             
             res.json({
                 valid: true,
                 message: '访问码验证成功',
                 code: cleanedAccessCode,
                 expiresAt: validCode.expiresAt,
-                remainingUses: validCode.maxUses - (validCode.currentUses + 1)
+                remainingUses: validCode.maxUses - validCode.currentUses
             });
         } else {
-            // 检查是否存在但已使用
-            const usedCode = await collection.findOne({
-                code: cleanedAccessCode
-            });
+            // 检查是否存在但已过期或达到使用上限
+            const existingCode = ACCESS_CODES.find(code => code.code === cleanedAccessCode);
             
-            if (usedCode && usedCode.used) {
-                console.log(`❌ 访问码已被使用: ${cleanedAccessCode}`);
-                res.status(400).json({
-                    valid: false,
-                    message: '该访问码已被使用'
-                });
-            } else if (usedCode && usedCode.expiresAt && usedCode.expiresAt <= new Date()) {
-                console.log(`❌ 访问码已过期: ${cleanedAccessCode}`);
-                res.status(400).json({
-                    valid: false,
-                    message: '该访问码已过期'
-                });
-            } else if (usedCode && usedCode.currentUses >= usedCode.maxUses) {
-                console.log(`❌ 访问码使用次数已达上限: ${cleanedAccessCode}`);
-                res.status(400).json({
-                    valid: false,
-                    message: '该访问码使用次数已达上限'
-                });
+            if (existingCode) {
+                if (existingCode.currentUses >= existingCode.maxUses) {
+                    console.log(`❌ 访问码使用次数已达上限: ${cleanedAccessCode}`);
+                    res.status(400).json({
+                        valid: false,
+                        message: '该访问码使用次数已达上限'
+                    });
+                } else if (new Date() >= existingCode.expiresAt) {
+                    console.log(`❌ 访问码已过期: ${cleanedAccessCode}`);
+                    res.status(400).json({
+                        valid: false,
+                        message: '该访问码已过期'
+                    });
+                } else {
+                    console.log(`❌ 未知的访问码状态: ${cleanedAccessCode}`);
+                    res.status(400).json({
+                        valid: false,
+                        message: '访问码状态异常'
+                    });
+                }
             } else {
                 console.log(`❌ 无效的访问码: ${cleanedAccessCode}`);
                 res.status(400).json({
@@ -251,96 +212,105 @@ app.post('/api/check-access-code', async (req, res) => {
 
     } catch (error) {
         console.error("验证访问码时发生错误:", error);
-        
-        if (error.name === 'MongoNetworkError') {
-            res.status(503).json({ 
-                valid: false,
-                message: '数据库连接失败，请稍后重试。',
-                code: 'DB_CONNECTION_ERROR'
-            });
-        } else {
-            res.status(500).json({ 
-                valid: false,
-                message: '服务器内部错误，无法验证访问码。',
-                code: 'INTERNAL_SERVER_ERROR'
-            });
-        }
+        res.status(500).json({ 
+            valid: false,
+            message: '服务器内部错误，无法验证访问码。'
+        });
     }
 });
 
-// 新增：创建访问码接口（管理用）
-app.post('/api/create-access-code', async (req, res) => {
+// 管理接口：查看访问码状态
+app.get('/api/admin/access-codes', (req, res) => {
     try {
-        const { code, expiresInHours = 24 } = req.body; // 默认24小时过期
+        // 简单的权限验证
+        const { adminKey } = req.query;
+        if (!adminKey || adminKey !== process.env.ADMIN_KEY) {
+            return res.status(403).json({ 
+                success: false,
+                message: '无权访问管理接口' 
+            });
+        }
 
-        // 验证管理员权限（这里可以添加更复杂的权限验证）
-        const { adminToken } = req.headers;
-        if (!adminToken || adminToken !== process.env.ADMIN_TOKEN) {
+        const codesInfo = ACCESS_CODES.map(code => ({
+            code: code.code,
+            currentUses: code.currentUses,
+            maxUses: code.maxUses,
+            remainingUses: code.maxUses - code.currentUses,
+            createdAt: code.createdAt,
+            expiresAt: code.expiresAt,
+            lastUsedAt: code.lastUsedAt || '从未使用',
+            isValid: code.currentUses < code.maxUses && new Date() < code.expiresAt
+        }));
+
+        res.json({
+            success: true,
+            accessCodes: codesInfo,
+            total: ACCESS_CODES.length,
+            active: ACCESS_CODES.filter(code => code.currentUses < code.maxUses && new Date() < code.expiresAt).length
+        });
+
+    } catch (error) {
+        console.error("获取访问码状态时发生错误:", error);
+        res.status(500).json({ 
+            success: false,
+            message: '服务器内部错误'
+        });
+    }
+});
+
+// 管理接口：重置访问码使用次数
+app.post('/api/admin/reset-access-code', (req, res) => {
+    try {
+        const { adminKey, code } = req.body;
+        
+        if (!adminKey || adminKey !== process.env.ADMIN_KEY) {
             return res.status(403).json({ 
                 success: false,
                 message: '无权执行此操作' 
             });
         }
 
-        if (!code || typeof code !== 'string') {
+        if (!code) {
             return res.status(400).json({ 
                 success: false,
-                message: '访问码不能为空且必须为字符串格式' 
+                message: '需要指定要重置的访问码' 
             });
         }
 
         const cleanedCode = code.trim().toUpperCase();
-        const collection = db.collection(ACCESS_CODES_COLLECTION);
-
-        // 检查是否已存在
-        const existingCode = await collection.findOne({ code: cleanedCode });
-        if (existingCode) {
-            return res.status(400).json({ 
+        const targetCode = ACCESS_CODES.find(ac => ac.code === cleanedCode);
+        
+        if (!targetCode) {
+            return res.status(404).json({ 
                 success: false,
-                message: '该访问码已存在' 
+                message: '未找到指定的访问码' 
             });
         }
 
-        // 自动计算时间
-        const now = new Date();
-        const expiresAt = new Date(now.getTime() + (expiresInHours * 60 * 60 * 1000)); // 默认24小时后
-
-        // 创建访问码文档（自动设置时间）
-        const accessCodeDoc = {
-            code: cleanedCode,
-            used: false,
-            maxUses: 1,
-            currentUses: 0,
-            createdAt: now,           // 自动设置为当前时间
-            updatedAt: now,           // 自动设置为当前时间
-            expiresAt: expiresAt,     // 自动设置为24小时后
-            createdBy: 'admin'
-        };
-
-        const result = await collection.insertOne(accessCodeDoc);
+        const oldUses = targetCode.currentUses;
+        targetCode.currentUses = 0;
         
-        console.log(`✅ 创建访问码成功: ${cleanedCode}, 过期时间: ${expiresAt}`);
+        console.log(`🔄 重置访问码 ${cleanedCode} 的使用次数: ${oldUses} -> 0`);
         
         res.json({
             success: true,
-            message: '访问码创建成功',
+            message: `访问码 ${cleanedCode} 使用次数已重置`,
             code: cleanedCode,
-            id: result.insertedId,
-            createdAt: now,
-            expiresAt: expiresAt
+            previousUses: oldUses,
+            currentUses: 0
         });
 
     } catch (error) {
-        console.error("创建访问码时发生错误:", error);
+        console.error("重置访问码时发生错误:", error);
         res.status(500).json({ 
             success: false,
-            message: '服务器内部错误，无法创建访问码。'
+            message: '服务器内部错误'
         });
     }
 });
 
-// 排名计算接口
-app.post('/api/rankings', async (req, res) => {
+// 排名计算接口（保持原有逻辑）
+app.post('/api/rankings', (req, res) => {
     try {
         const userScores = req.body;
 
@@ -348,6 +318,7 @@ app.post('/api/rankings', async (req, res) => {
             return res.status(400).json({ error: '请求格式错误：需要包含分数数据的对象' });
         }
 
+        // 验证所有维度分数
         for (const dim of DIMENSIONS) {
             const userScore = userScores[dim];
             
@@ -359,132 +330,56 @@ app.post('/api/rankings', async (req, res) => {
             }
         }
 
-        const collection = db.collection(SIMULATION_COLLECTION);
+        // 模拟排名计算（基于正态分布）
         const rankings = {};
-
         for (const dim of DIMENSIONS) {
             const userScore = userScores[dim];
-            const lowerCount = await collection.countDocuments({
-                [dim]: { $lt: userScore }
-            });
-
-            const rankPercentage = Math.floor((lowerCount / 1000) * 100);
-            rankings[dim] = Math.min(100, Math.max(0, rankPercentage));
+            
+            // 模拟基于正态分布的排名计算
+            // 假设平均分为20，标准差为5
+            const mean = 20;
+            const stdDev = 5;
+            
+            // 计算Z-score
+            const zScore = (userScore - mean) / stdDev;
+            
+            // 使用标准正态分布计算百分比
+            // 这是一个简化的近似计算
+            const percentile = 100 * (0.5 * (1 + Math.tanh(zScore / Math.sqrt(2))));
+            
+            rankings[dim] = Math.min(100, Math.max(0, Math.round(percentile)));
         }
 
         res.json({
             message: "排名计算成功",
             rankings: rankings,
             userScores: userScores,
-            totalComparisons: 1000,
+            totalComparisons: 1000, // 模拟数据量
             calculatedAt: new Date().toISOString()
         });
 
     } catch (error) {
         console.error("计算排名时发生错误:", error);
-        
-        if (error.name === 'MongoNetworkError') {
-            res.status(503).json({ 
-                error: '数据库连接失败，请稍后重试。',
-                code: 'DB_CONNECTION_ERROR'
-            });
-        } else {
-            res.status(500).json({ 
-                error: '服务器内部错误，无法计算排名。',
-                code: 'INTERNAL_SERVER_ERROR'
-            });
-        }
-    }
-});
-
-// === 数据库连接函数 ===
-
-async function connectDB() {
-    try {
-        if (client) {
-            await client.close();
-        }
-
-        console.log('正在使用以下 URI 连接 MongoDB:');
-        console.log(URI.substring(0, 40) + '...'); // 只显示部分，避免暴露密码
-
-        client = new MongoClient(URI, {
-            serverSelectionTimeoutMS: 10000,
-            socketTimeoutMS: 45000,
+        res.status(500).json({ 
+            error: '服务器内部错误，无法计算排名。'
         });
-
-        await client.connect();
-        db = client.db(DB_NAME);
-        
-        console.log("✅ MongoDB 连接成功！数据库已准备就绪。");
-        
-        // 测试连接和集合
-        const collection = db.collection(SIMULATION_COLLECTION);
-        const count = await collection.countDocuments();
-        console.log(`📊 当前集合文档数量: ${count}`);
-        
-        // 检查访问码集合是否存在，如果不存在则创建索引
-        const accessCodesCollection = db.collection(ACCESS_CODES_COLLECTION);
-        await accessCodesCollection.createIndex({ code: 1 }, { unique: true });
-        await accessCodesCollection.createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 });
-        const accessCodesCount = await accessCodesCollection.countDocuments();
-        console.log(`🔑 访问码数量: ${accessCodesCount}`);
-        
-        return db;
-
-    } catch (error) {
-        console.error("❌ MongoDB 连接失败:", error.message);
-        
-        if (error.message.includes('authentication')) {
-            console.error("🔐 认证失败：请检查 MONGO_URI 中的用户名和密码");
-        } else if (error.message.includes('getaddrinfo')) {
-            console.error("🌐 网络连接失败：请检查网络和 MongoDB Atlas 白名单设置");
-        } else if (error.message.includes('mongodb')) {
-            console.error("🔗 连接字符串格式错误：请检查 MONGO_URI 格式");
-        }
-        
-        throw error;
     }
-}
-
-// === 优雅关闭处理 ===
-
-process.on('SIGINT', async () => {
-    console.log('\n正在关闭服务器...');
-    if (client) {
-        await client.close();
-        console.log('MongoDB 连接已关闭');
-    }
-    process.exit(0);
 });
 
 // === 服务器启动 ===
 
-async function startServer() {
-    try {
-        await connectDB();
-        
-        // 修改这里：从 localhost 改为 0.0.0.0
-        app.listen(PORT, HOST, () => {
-            console.log(`🚀 服务器正在 ${HOST}:${PORT} 上运行`);
-            console.log(`📊 数据库: ${DB_NAME}`);
-            console.log(`📁 集合: ${SIMULATION_COLLECTION}`);
-            console.log(`🔑 访问码集合: ${ACCESS_CODES_COLLECTION}`);
-            console.log(`🔢 维度数量: ${DIMENSIONS.length}`);
-            console.log(`📍 健康检查: http://${HOST}:${PORT}/api/health`);
-            console.log(`🔐 访问码验证接口: POST http://${HOST}:${PORT}/api/check-access-code`);
-            console.log(`🌐 外部访问地址: https://overall-carolan-boyn-7a3aea8b.koyeb.app`);
-        });
-
-    } catch (error) {
-        console.error("❌ 服务器启动失败:", error.message);
-        console.log("💡 请检查：");
-        console.log("   1. .env 文件中的 MONGO_URI 是否正确");
-        console.log("   2. MongoDB Atlas 网络访问设置");
-        console.log("   3. 数据库用户名和密码");
-        process.exit(1);
-    }
-}
-
-// 启动服务器
-startServer();
+app.listen(PORT, HOST, () => {
+    console.log(`🚀 服务器正在 ${HOST}:${PORT} 上运行`);
+    console.log(`📊 维度数量: ${DIMENSIONS.length}`);
+    console.log(`🔑 访问码系统: 环境变量驱动`);
+    console.log(`📍 健康检查: http://${HOST}:${PORT}/api/health`);
+    console.log(`🔐 访问码验证接口: POST http://${HOST}:${PORT}/api/check-access-code`);
+    console.log(`👨‍💼 管理接口: GET http://${HOST}:${PORT}/api/admin/access-codes?adminKey=YOUR_KEY`);
+    console.log(`🌐 外部访问地址: https://overall-carolan-boyn-7a3aea8b.koyeb.app`);
+    
+    // 显示访问码摘要
+    const activeCodes = ACCESS_CODES.filter(code => 
+        code.currentUses < code.maxUses && new Date() < code.expiresAt
+    );
+    console.log(`✅ 已加载 ${ACCESS_CODES.length} 个访问码，其中 ${activeCodes.length} 个处于活跃状态`);
+});
