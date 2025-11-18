@@ -1,11 +1,16 @@
-// index.js - 安全增强版本（修复路由问题）
+// index.js - 安全增强版本（修复路由崩溃与IP识别问题）
 
 const express = require('express');
 require('dotenv').config();
 
 const app = express();
-const PORT = process.env.PORT || 3000;
-const HOST = process.env.HOST || '0.0.0.0';
+const PORT = process.env.PORT || 8000; // Koyeb 默认通常推荐 8000 或 8080
+const HOST = '0.0.0.0';
+
+// === 关键修复：信任代理 ===
+// 因为部署在 Koyeb/Netlify 等平台，必须设置此项才能获取用户真实 IP
+// 否则所有请求的 IP 都会变成 Koyeb 内部负载均衡器的 IP
+app.set('trust proxy', 1);
 
 // 维度列表
 const DIMENSIONS = [
@@ -75,17 +80,17 @@ function initializeAccessCodes() {
         const accessCodesEnv = process.env.ACCESS_CODES;
         
         if (!accessCodesEnv) {
-            console.warn('⚠️ 未设置 ACCESS_CODES 环境变量');
+            console.warn('⚠️  未设置 ACCESS_CODES 环境变量，默认无访问码');
             ACCESS_CODES = [];
         } else {
-            const codes = accessCodesEnv.split(',').map(code => code.trim().toUpperCase());
+            const codes = accessCodesEnv.split(',').map(code => code.trim().toUpperCase()).filter(code => code.length > 0);
             
             ACCESS_CODES = codes.map(code => ({
                 code: code,
-                maxUses: parseInt(process.env.ACCESS_CODE_MAX_USES) || 100,
+                maxUses: parseInt(process.env.ACCESS_CODE_MAX_USES) || 9999,
                 currentUses: 0,
                 createdAt: new Date(),
-                expiresAt: new Date(Date.now() + (parseInt(process.env.ACCESS_CODE_EXPIRY_DAYS) || 30) * 24 * 60 * 60 * 1000),
+                expiresAt: new Date(Date.now() + (parseInt(process.env.ACCESS_CODE_EXPIRY_DAYS) || 365) * 24 * 60 * 60 * 1000),
                 lastUsed: null
             }));
             
@@ -98,29 +103,10 @@ function initializeAccessCodes() {
     }
 }
 
-// 获取客户端真实IP
-function getClientIP(req) {
-    const forwarded = req.headers['x-forwarded-for'];
-    if (forwarded) {
-        const ips = forwarded.split(',');
-        return ips[0].trim();
-    }
-    
-    const realIP = req.headers['x-real-ip'];
-    if (realIP) return realIP;
-    
-    const cfConnectingIP = req.headers['cf-connecting-ip'];
-    if (cfConnectingIP) return cfConnectingIP;
-    
-    return req.connection.remoteAddress || 
-           req.socket.remoteAddress || 
-           req.connection.socket.remoteAddress;
-}
-
 // 访问码格式验证
 function isValidAccessCodeFormat(code) {
-    // 基本格式检查：只允许字母数字，长度4-20
-    return /^[A-Z0-9]{4,20}$/.test(code);
+    // 基本格式检查：只允许字母数字，长度1-20
+    return /^[A-Z0-9]{1,20}$/.test(code);
 }
 
 // 清理过期的安全记录
@@ -163,8 +149,6 @@ function checkForAttacks() {
             if (timeSinceLastAlert > ALERT_INTERVAL) {
                 console.log(`🚨 安全警报: 检测到可能的攻击！过去一小时内有 ${recentFailures} 次失败尝试`);
                 ATTACK_DETECTION.lastAlert = now;
-                
-                // 这里可以添加邮件、Slack等通知机制
             }
         }
         
@@ -180,14 +164,14 @@ initializeAccessCodes();
 cleanupSecurityRecords();
 checkForAttacks();
 
-// === 修复的 CORS 中间件 ===
+// === 手动 CORS 中间件 (修复路由崩溃问题) ===
+// 不使用 app.options('*')，而是使用通用中间件
 app.use((req, res, next) => {
-    // CORS配置
     res.header('Access-Control-Allow-Origin', '*');
-    res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+    res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
     res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With, Access-Code');
     
-    // 处理预检请求
+    // 直接响应预检请求
     if (req.method === 'OPTIONS') {
         return res.status(200).end();
     }
@@ -199,10 +183,11 @@ app.use(express.json({ limit: '10kb' })); // 限制请求体大小
 
 // 安全检查和限流中间件
 app.use((req, res, next) => {
-    const clientIP = getClientIP(req);
+    // 使用 req.ip，配合 app.set('trust proxy', 1) 可以获取真实IP
+    const clientIP = req.ip; 
     const path = req.path;
     
-    // 只对特定路径进行安全检查
+    // 只对验证码接口进行安全检查
     if (path === '/api/check-access-code') {
         // 获取或创建安全记录
         if (!SECURITY_RECORDS.has(clientIP)) {
@@ -216,13 +201,13 @@ app.use((req, res, next) => {
             console.log(`🚫 拒绝被封禁IP的请求: ${clientIP}`);
             return res.status(429).json({
                 valid: false,
-                message: '请求过于频繁，请稍后再试'
+                message: '尝试次数过多，请15分钟后再试'
             });
         }
         
-        // 检查请求频率（简单限流）
+        // 检查请求频率（简单限流：每秒1次）
         const timeSinceLastAttempt = new Date() - securityRecord.lastAttempt;
-        if (timeSinceLastAttempt < 1000) { // 每秒最多1次
+        if (timeSinceLastAttempt < 1000) { 
             console.log(`⚠️ IP ${clientIP} 请求过于频繁`);
             return res.status(429).json({
                 valid: false,
@@ -276,7 +261,6 @@ app.get('/api/health', (req, res) => {
                 record.isCurrentlyBlocked()
             ).length
         },
-        dimensions: DIMENSIONS,
         serverTime: new Date().toISOString()
     });
 });
@@ -286,7 +270,7 @@ app.post('/api/check-access-code', (req, res) => {
     try {
         const { accessCode } = req.body;
         const securityRecord = req.securityRecord;
-        const clientIP = securityRecord ? securityRecord.ip : getClientIP(req);
+        const clientIP = req.ip; // 使用 req.ip (已配置 trust proxy)
 
         // 全局统计
         ATTACK_DETECTION.totalAttempts++;
@@ -297,7 +281,7 @@ app.post('/api/check-access-code', (req, res) => {
             ATTACK_DETECTION.failedAttempts++;
             return res.status(400).json({ 
                 valid: false, 
-                message: '访问码不能为空且必须为字符串格式' 
+                message: '请输入访问码' 
             });
         }
 
@@ -353,7 +337,7 @@ app.post('/api/check-access-code', (req, res) => {
             if (securityRecord) securityRecord.addAttempt(false);
             ATTACK_DETECTION.failedAttempts++;
             
-            // 检查访问码状态
+            // 检查访问码状态（用于给用户更具体的提示，或者可以为了安全统一返回无效）
             const existingCode = ACCESS_CODES.find(code => code.code === cleanedAccessCode);
             
             let message = '无效的访问码';
@@ -385,7 +369,7 @@ app.post('/api/check-access-code', (req, res) => {
         
         res.status(500).json({ 
             valid: false,
-            message: '服务器内部错误，无法验证访问码。'
+            message: '服务器错误，请稍后重试'
         });
     }
 });
@@ -493,7 +477,7 @@ app.post('/api/admin/unblock-ip', (req, res) => {
     }
 });
 
-// 排名计算接口（保持不变）
+// 排名计算接口
 app.post('/api/rankings', (req, res) => {
     try {
         const userScores = req.body;
@@ -502,21 +486,18 @@ app.post('/api/rankings', (req, res) => {
             return res.status(400).json({ error: '请求格式错误：需要包含分数数据的对象' });
         }
 
+        // 简单的输入验证
+        const processedScores = {};
         for (const dim of DIMENSIONS) {
-            const userScore = userScores[dim];
-            
-            if (typeof userScore !== 'number' || isNaN(userScore)) {
-                return res.status(400).json({ 
-                    error: `分数格式错误或缺失: ${dim}`,
-                    details: `期望数字类型，收到: ${typeof userScore}`
-                });
-            }
+            const score = userScores[dim];
+            processedScores[dim] = (typeof score === 'number') ? score : 0;
         }
 
         const rankings = {};
         for (const dim of DIMENSIONS) {
-            const userScore = userScores[dim];
+            const userScore = processedScores[dim];
             
+            // 假设的常模数据 (平均分20，标准差5)
             const mean = 20;
             const stdDev = 5;
             const zScore = (userScore - mean) / stdDev;
@@ -528,7 +509,7 @@ app.post('/api/rankings', (req, res) => {
         res.json({
             message: "排名计算成功",
             rankings: rankings,
-            userScores: userScores,
+            userScores: processedScores,
             totalComparisons: 1000,
             calculatedAt: new Date().toISOString()
         });
@@ -544,10 +525,8 @@ app.post('/api/rankings', (req, res) => {
 // 启动服务器
 app.listen(PORT, HOST, () => {
     console.log(`🚀 服务器正在 ${HOST}:${PORT} 上运行`);
-    console.log(`🔒 安全防护: 已启用IP监控、频率限制和攻击检测`);
+    console.log(`🔒 安全防护: 已启用IP监控 (Proxy Trust: On)`);
     console.log(`📍 健康检查: http://${HOST}:${PORT}/api/health`);
-    console.log(`🔐 访问码验证接口: POST http://${HOST}:${PORT}/api/check-access-code`);
-    console.log(`👨‍💼 安全管理: GET http://${HOST}:${PORT}/api/admin/security-status?adminKey=YOUR_KEY`);
 });
 
 // 优雅关闭处理
